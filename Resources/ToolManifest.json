@@ -1,0 +1,24 @@
+{
+  "scrcpyVersion": "5.0.1",
+  "archiveSHA256": "33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b",
+  "source": "https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1",
+  "files": {
+    "adb": "1811e253b21b12cbfda7201ebaf86c10e7ddcb5c606a7a81f7c82b4c429c2d3b",
+    "scrcpy": "f4c205df0320209fe8fc836b8fb8bbe669703d9fab586e6038da45495945a17e",
+    "scrcpy-server": "764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536"
+  },
+  "clientBuild": {
+    "type": "CableDeX restricted source build",
+    "upstreamCommit": "a60891aea193d92e7e5c3942700eca63f9d19a5f",
+    "restrictions": [
+      "audio output and text clipboard follow app switches",
+      "no microphone capture",
+      "selected shared-storage transfers through native app only",
+      "no viewer file drop",
+      "no APK install",
+      "no recording",
+      "no TCP device connect"
+    ],
+    "patch": "Backend/cabledex.patch"
+  }
+}
