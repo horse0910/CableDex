@@ -1,0 +1,322 @@
+diff --git a/app/src/adb/adb.c b/app/src/adb/adb.c
+index 2dc4408..cb2d0c0 100644
+--- a/app/src/adb/adb.c
++++ b/app/src/adb/adb.c
+@@ -1,4 +1,5 @@
+ #include "adb.h"
++#include "../cabledex_policy.h"
+ 
+ #include <assert.h>
+ #include <stdio.h>
+@@ -331,6 +332,11 @@ sc_adb_reverse_remove(struct sc_intr *intr, const char *serial,
+ bool
+ sc_adb_push(struct sc_intr *intr, const char *serial, const char *local,
+             const char *remote, unsigned flags) {
++    const char *server = getenv("SCRCPY_SERVER_PATH");
++    if (!cabledex_push_allowed(local, remote, server)) {
++        LOGW("CableDeX: only the verified temporary mirroring server may be pushed");
++        return false;
++    }
+     assert(serial);
+     const char *const argv[] =
+         SC_ADB_COMMAND("-s", serial, "push", local, remote);
+@@ -343,71 +349,24 @@ sc_adb_push(struct sc_intr *intr, const char *serial, const char *local,
+ bool
+ sc_adb_install(struct sc_intr *intr, const char *serial, const char *local,
+                unsigned flags) {
+-    assert(serial);
+-    const char *const argv[] =
+-        SC_ADB_COMMAND("-s", serial, "install", "-r", local);
+-
+-    sc_pid pid = sc_adb_execute(argv, flags);
+-
+-    return process_check_success_intr(intr, pid, "adb install", flags);
++    (void) intr; (void) serial; (void) local; (void) flags;
++    LOGW("CableDeX: APK installation is disabled");
++    return false;
+ }
+ 
+ bool
+ sc_adb_tcpip(struct sc_intr *intr, const char *serial, uint16_t port,
+              unsigned flags) {
+-    char port_string[5 + 1];
+-    int r = snprintf(port_string, sizeof(port_string), "%" PRIu16, port);
+-    assert(r >= 0 && (size_t) r < sizeof(port_string));
+-    (void) r;
+-
+-    assert(serial);
+-    const char *const argv[] =
+-        SC_ADB_COMMAND("-s", serial, "tcpip", port_string);
+-
+-    sc_pid pid = sc_adb_execute(argv, flags);
+-    return process_check_success_intr(intr, pid, "adb tcpip", flags);
++    (void) intr; (void) serial; (void) port; (void) flags;
++    LOGW("CableDeX: TCP debugging is disabled");
++    return false;
+ }
+ 
+ bool
+ sc_adb_connect(struct sc_intr *intr, const char *ip_port, unsigned flags) {
+-    const char *const argv[] = SC_ADB_COMMAND("connect", ip_port);
+-
+-    sc_pipe pout;
+-    sc_pid pid = sc_adb_execute_p(argv, flags, &pout);
+-    if (pid == SC_PROCESS_NONE) {
+-        LOGE("Could not execute \"adb connect\"");
+-        return false;
+-    }
+-
+-    // "adb connect" always returns successfully (with exit code 0), even in
+-    // case of failure. As a workaround, check if its output starts with
+-    // "connected" or "already connected".
+-    char buf[128];
+-    ssize_t r = sc_pipe_read_all_intr(intr, pid, pout, buf, sizeof(buf) - 1);
+-    sc_pipe_close(pout);
+-
+-    bool ok = process_check_success_intr(intr, pid, "adb connect", flags);
+-    if (!ok) {
+-        return false;
+-    }
+-
+-    if (r == -1) {
+-        return false;
+-    }
+-
+-    assert((size_t) r < sizeof(buf));
+-    buf[r] = '\0';
+-
+-    ok = !strncmp("connected", buf, sizeof("connected") - 1)
+-        || !strncmp("already connected", buf, sizeof("already connected") - 1);
+-    if (!ok && !(flags & SC_ADB_NO_STDERR)) {
+-        // "adb connect" also prints errors to stdout. Since we capture it,
+-        // re-print the error to stderr.
+-        size_t len = strcspn(buf, "\r\n");
+-        buf[len] = '\0';
+-        fprintf(stderr, "%s\n", buf);
+-    }
+-    return ok;
++    (void) intr; (void) ip_port; (void) flags;
++    LOGW("CableDeX: network device connections are disabled");
++    return false;
+ }
+ 
+ bool
+diff --git a/app/src/controller.c b/app/src/controller.c
+index 19e2acb..45220eb 100644
+--- a/app/src/controller.c
++++ b/app/src/controller.c
+@@ -1,4 +1,5 @@
+ #include "controller.h"
++#include "cabledex_policy.h"
+ 
+ #include <assert.h>
+ 
+@@ -95,6 +96,11 @@ sc_controller_destroy(struct sc_controller *controller) {
+ bool
+ sc_controller_push_msg(struct sc_controller *controller,
+                        const struct sc_control_msg *msg) {
++    // CableDeX: default-deny non-display control messages.
++    if (!cabledex_control_allowed(msg->type)) {
++        LOGW("CableDeX: non-display control request blocked (%d)", (int) msg->type);
++        return false;
++    }
+     // RESIZE_DISPLAY messages are handled separately
+     assert(msg->type != SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY);
+ 
+diff --git a/app/src/file_pusher.c b/app/src/file_pusher.c
+index fe55707..3e34aa9 100644
+--- a/app/src/file_pusher.c
++++ b/app/src/file_pusher.c
+@@ -80,37 +80,9 @@ sc_file_pusher_destroy(struct sc_file_pusher *fp) {
+ bool
+ sc_file_pusher_request(struct sc_file_pusher *fp,
+                        enum sc_file_pusher_action action, char *file) {
+-    // start file_pusher if it's used for the first time
+-    if (!fp->initialized) {
+-        if (!sc_file_pusher_start(fp)) {
+-            return false;
+-        }
+-        fp->initialized = true;
+-    }
+-
+-    LOGI("Request to %s %s", action == SC_FILE_PUSHER_ACTION_INSTALL_APK
+-                                 ? "install" : "push",
+-                             file);
+-    struct sc_file_pusher_request req = {
+-        .action = action,
+-        .file = file,
+-    };
+-
+-    sc_mutex_lock(&fp->mutex);
+-    bool was_empty = sc_vecdeque_is_empty(&fp->queue);
+-    bool res = sc_vecdeque_push(&fp->queue, req);
+-    if (!res) {
+-        LOG_OOM();
+-        sc_mutex_unlock(&fp->mutex);
+-        return false;
+-    }
+-
+-    if (was_empty) {
+-        sc_cond_signal(&fp->event_cond);
+-    }
+-    sc_mutex_unlock(&fp->mutex);
+-
+-    return true;
++    (void) fp; (void) action; (void) file;
++    LOGW("CableDeX: use Send files in the app; viewer file drops and APK installation are disabled");
++    return false;
+ }
+ 
+ static bool
+diff --git a/app/src/input_manager.c b/app/src/input_manager.c
+index af6ef90..f288c30 100644
+--- a/app/src/input_manager.c
++++ b/app/src/input_manager.c
+@@ -1,5 +1,6 @@
+ #include "input_manager.h"
+ 
++#include "cabledex_policy.h"
+ #include <assert.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -162,6 +163,8 @@ collapse_panels(struct sc_input_manager *im) {
+ 
+ static bool
+ get_device_clipboard(struct sc_input_manager *im, enum sc_copy_key copy_key) {
++    if (!cabledex_feature_enabled("CABLEDEX_CLIPBOARD")) { return false; }
++
+     assert(im->controller && im->kp && !im->camera);
+ 
+     struct sc_control_msg msg;
+@@ -179,6 +182,8 @@ get_device_clipboard(struct sc_input_manager *im, enum sc_copy_key copy_key) {
+ static bool
+ set_device_clipboard(struct sc_input_manager *im, bool paste,
+                      uint64_t sequence) {
++    if (!cabledex_feature_enabled("CABLEDEX_CLIPBOARD")) { return false; }
++
+     assert(im->controller && im->kp && !im->camera);
+ 
+     char *text = SDL_GetClipboardText();
+@@ -238,6 +243,8 @@ switch_fps_counter_state(struct sc_input_manager *im) {
+ 
+ static void
+ clipboard_paste(struct sc_input_manager *im) {
++    if (!cabledex_feature_enabled("CABLEDEX_CLIPBOARD")) { return; }
++
+     assert(im->controller && im->kp && !im->camera);
+ 
+     char *text = SDL_GetClipboardText();
+diff --git a/app/src/receiver.c b/app/src/receiver.c
+index be0be0c..c8b7aee 100644
+--- a/app/src/receiver.c
++++ b/app/src/receiver.c
+@@ -1,5 +1,6 @@
+ #include "receiver.h"
+ 
++#include "cabledex_policy.h"
+ #include <assert.h>
+ #include <inttypes.h>
+ #include <stdlib.h>
+@@ -44,6 +45,8 @@ sc_receiver_destroy(struct sc_receiver *receiver) {
+ 
+ static void
+ task_set_clipboard(void *userdata) {
++    if (!cabledex_feature_enabled("CABLEDEX_CLIPBOARD")) { free(userdata); return; }
++
+     assert(sc_thread_is_main());
+ 
+     char *text = userdata;
+diff --git a/app/src/scrcpy.c b/app/src/scrcpy.c
+index 0967e5d..e2d3a26 100644
+--- a/app/src/scrcpy.c
++++ b/app/src/scrcpy.c
+@@ -1,5 +1,6 @@
+ #include "scrcpy.h"
+ 
++#include "cabledex_policy.h"
+ #include <assert.h>
+ #include <inttypes.h>
+ #include <stdbool.h>
+@@ -375,6 +376,13 @@ sc_init_video_hwdec(struct sc_hwdec *hwdec, enum sc_hwdec_mode mode,
+ 
+ enum scrcpy_exit_code
+ scrcpy(struct scrcpy_options *options) {
++    // This dedicated client does video + keyboard/mouse, never audio, clipboard or recording.
++    options->audio = options->audio && cabledex_feature_enabled("CABLEDEX_AUDIO");
++    options->audio_playback = options->audio_playback && options->audio;
++    options->audio_source = SC_AUDIO_SOURCE_OUTPUT;
++    options->clipboard_autosync = options->clipboard_autosync && cabledex_feature_enabled("CABLEDEX_CLIPBOARD");
++    options->record_filename = NULL;
++    LOGI("CableDeX: audio and clipboard follow app settings; APK installation, raw file drops, recording and network device connections blocked");
+     static struct scrcpy scrcpy;
+ #ifndef NDEBUG
+     // Detect missing initializations
+@@ -592,17 +600,12 @@ scrcpy(struct scrcpy_options *options) {
+         file_pusher_initialized = true;
+     }
+ 
+-    bool has_video_buffer = options->video_buffer;
+-#ifdef HAVE_V4L2
+-    has_video_buffer |= options->v4l2_buffer;
+-#endif
+-
+     if (options->video) {
+         static const struct sc_demuxer_callbacks video_demuxer_cbs = {
+             .on_ended = sc_video_demuxer_on_ended,
+         };
+-        // If a video buffer is present, then the recv date must be set
+-        bool set_recv_date = has_video_buffer;
++        // Timestamp every completed video packet for the Mac pipeline counter
++        bool set_recv_date = true;
+         sc_demuxer_init(&s->video_demuxer, "video", s->server.video_socket,
+                         set_recv_date, &video_demuxer_cbs, NULL);
+     }
+@@ -865,7 +868,7 @@ aoa_complete:
+ 
+         // If a video buffer is present, then the recv date must be forwarded
+         // from the AVPacket to the AVFrame
+-        bool copy_opaque = has_video_buffer;
++        bool copy_opaque = true;
+         if (!sc_decoder_init(&s->video_decoder, "video", &s->hwdec, copy_opaque,
+                              &decoder_cbs, NULL)) {
+             goto end;
+diff --git a/app/src/screen.c b/app/src/screen.c
+index fec823e..3531eca 100644
+--- a/app/src/screen.c
++++ b/app/src/screen.c
+@@ -9,6 +9,8 @@
+ #include "options.h"
+ #include "util/log.h"
+ #include "util/sdl.h"
++#include "util/tick.h"
++#include <stdlib.h>
+ 
+ #define DISPLAY_MARGINS 96
+ 
+@@ -988,6 +990,26 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
+     }
+ 
+     sc_screen_render(screen, false);
++    // Mac-only timing: complete packet received -> decode/queue -> render submission.
++    // This excludes phone rendering/encoding, USB transit, input transit, panel scanout.
++    if (frame->opaque_ref && frame->opaque_ref->size >= sizeof(sc_tick)) {
++        sc_tick now = sc_tick_now();
++        sc_tick received = *(const sc_tick *) frame->opaque_ref->data;
++        sc_tick elapsed = now - received;
++        static sc_tick sum, maximum, last_report;
++        static unsigned count;
++        if (elapsed >= 0 && elapsed < SC_TICK_FROM_SEC(10)) {
++            sum += elapsed;
++            if (elapsed > maximum) maximum = elapsed;
++            ++count;
++        }
++        if (!last_report) last_report = now;
++        if (count && now - last_report >= SC_TICK_FROM_SEC(1)) {
++            LOGI("CDX_METRIC host_ms avg=%.3f max=%.3f n=%u",
++                 (double) sum / count / 1000.0, (double) maximum / 1000.0, count);
++            sum = maximum = 0; count = 0; last_report = now;
++        }
++    }
+     return true;
+ }
+ 

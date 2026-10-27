@@ -1,0 +1,4 @@
+https://github.com/pkgconf/pkgconf
+tag: pkgconf-2.5.1
+commit: 4fc570f91d9d8d843ab32d2198a5c064538d8ffd
+Build-time only.
